@@ -8,7 +8,7 @@ import datetime
 from datetime import timedelta
 import asyncio
 import pytz
-from core_error import handle_ex
+from core_error import handle_ex, send_sms_alert
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///trade.db'
@@ -55,6 +55,45 @@ def to_eastern_time(timestamp_input):
 def eastern_now():
     """Get current time in Eastern timezone"""
     return datetime.datetime.now(EASTERN)
+
+def get_blocked_patterns():
+    """Get all blocked patterns from all account groups"""
+    blocked_patterns = set()
+
+    # Check all sections in config for blocked-patterns
+    for section in config.sections():
+        if config.has_option(section, 'blocked-patterns'):
+            patterns = config.get(section, 'blocked-patterns')
+            # Split by comma and strip whitespace
+            for pattern in patterns.split(','):
+                pattern = pattern.strip()
+                if pattern:
+                    blocked_patterns.add(pattern.lower())
+
+    return blocked_patterns
+
+def validate_strategy(data_dict):
+    """
+    Validate that the signal's strategy doesn't contain any blocked patterns.
+    Returns (is_valid, error_message)
+    """
+    # Get the strategy path from the signal
+    strategy_path = data_dict.get('strategy', {}).get('strategy', '')
+
+    if not strategy_path:
+        # If there's no strategy path, allow it (backward compatibility)
+        return True, None
+
+    # Get blocked patterns
+    blocked_patterns = get_blocked_patterns()
+
+    # Check if strategy path contains any blocked patterns
+    strategy_lower = strategy_path.lower()
+    for pattern in blocked_patterns:
+        if pattern in strategy_lower:
+            return False, f"Signal rejected: strategy '{strategy_path}' contains blocked pattern '{pattern}'"
+
+    return True, None
 
 # SQLite connection (simpler than PostgreSQL)
 def get_db():
@@ -326,16 +365,19 @@ def process_signal_retries():
                 """, (retry_id,))
                 
                 # Mark ALL older signal retries for this ticker/bot as completed (0 retries)
+                # SQLite doesn't support UPDATE...FROM, so we need to use a subquery
                 cursor.execute("""
-                    UPDATE signal_retries sr
+                    UPDATE signal_retries
                     SET retries_remaining = 0
-                    FROM signals s
-                    WHERE sr.original_signal_id = s.id
-                    AND s.ticker = ?
-                    AND s.bot = ?
-                    AND s.timestamp < ?
-                    AND sr.retries_remaining > 0
-                    AND sr.id != ?
+                    WHERE original_signal_id IN (
+                        SELECT s.id
+                        FROM signals s
+                        WHERE s.ticker = ?
+                        AND s.bot = ?
+                        AND s.timestamp < ?
+                    )
+                    AND retries_remaining > 0
+                    AND id != ?
                 """, (signal_dict['ticker'], signal_dict['strategy'].get('bot', ''), data['timestamp'], retry_id))
                 
             except Exception as e:
@@ -394,14 +436,36 @@ def save_signal(data_dict):
     try:
         # Convert signal to position percentage format
         data_dict = convert_to_position_pct_signal(data_dict)
-        
+
         app.logger.info(f"Received signal: {json.dumps(data_dict, default=str)}")
-        
+
+        # Validate that ticker is present
+        if 'ticker' not in data_dict or not data_dict['ticker']:
+            error_msg = "Signal rejected: missing 'ticker' field. Please add '\"ticker\": \"{{{{ticker}}}}\"' to your TradingView alert message."
+            app.logger.error(error_msg)
+            app.logger.error(f"Rejected signal data: {json.dumps(data_dict, default=str)}")
+            raise ValueError(error_msg)
+
+        # Validate strategy against blocked patterns
+        is_valid, validation_error = validate_strategy(data_dict)
+        if not is_valid:
+            app.logger.error(validation_error)
+            app.logger.error(f"Rejected signal data: {json.dumps(data_dict, default=str)}")
+
+            # Send SMS notification
+            ticker = data_dict.get('ticker', 'unknown')
+            strategy = data_dict.get('strategy', {}).get('strategy', 'unknown')
+            market_position = data_dict.get('strategy', {}).get('market_position', 'unknown')
+            sms_message = f"SIGNAL REJECTED: {ticker} {market_position} from {strategy} (contains blocked pattern)"
+            send_sms_alert(sms_message)
+
+            raise ValueError(validation_error)
+
         # Set retry times
         is_directional = data_dict['strategy'].get('market_position') in ['long', 'short']
         initial_retry_time = datetime.datetime.now() if is_directional else datetime.datetime.now() + timedelta(seconds=15)
         verification_retry_time = datetime.datetime.now() + timedelta(minutes=1)
-        
+
         db = get_db()
         cursor = db.cursor()
 
@@ -497,6 +561,7 @@ def save_signal(data_dict):
 
     except Exception as e:
         handle_ex(e, context="save_signal", service="webapp", extra_tags=['component:core'])
-        db.rollback()
+        if 'db' in locals():
+            db.rollback()
         raise
 

@@ -1,0 +1,97 @@
+{% extends 'base.html' %}
+
+{% block title %}Algorithm Status{% endblock %}
+
+{% block head %}
+<style>
+    .report-list {
+        max-height: 800px;
+        overflow-y: auto;
+        border-right: 1px solid #dee2e6;
+    }
+    .report-item {
+        cursor: pointer;
+        padding: 10px;
+        border-bottom: 1px solid #e9ecef;
+        transition: background-color 0.2s;
+    }
+    .report-item:hover {
+        background-color: #f8f9fa;
+    }
+    .report-item.active {
+        background-color: #e7f3ff;
+        border-left: 3px solid #0d6efd;
+    }
+    .report-content {
+        padding: 20px;
+        max-height: 800px;
+        overflow-y: auto;
+    }
+    .report-content table {
+        width: 100%;
+        margin: 20px 0;
+    }
+    .report-content table,
+    .report-content th,
+    .report-content td {
+        border: 1px solid #dee2e6;
+        border-collapse: collapse;
+    }
+    .report-content th,
+    .report-content td {
+        padding: 8px;
+        text-align: left;
+    }
+    .report-content th {
+        background-color: #f8f9fa;
+        font-weight: bold;
+    }
+    .report-content tbody tr:hover {
+        background-color: #f8f9fa;
+    }
+    .no-selection {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 400px;
+        color: #6c757d;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <h2 class="mb-4">Algorithm Performance Reports</h2>
+
+    <div class="row">
+        <!-- Left sidebar: List of reports -->
+        <div class="col-md-3 report-list">
+            {% for report in reports %}
+            <div class="report-item {% if selected == report.filename %}active{% endif %}"
+                 onclick="location.href='{{ url_for('algorithms', report=report.filename) }}'">
+                <div class="fw-bold">{{ report.filename }}</div>
+                <small class="text-muted">{{ report.modified.strftime('%Y-%m-%d %H:%M:%S') }}</small>
+            </div>
+            {% endfor %}
+            {% if reports|length == 0 %}
+            <div class="text-center text-muted p-4">
+                No performance reports found
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Right side: Report content -->
+        <div class="col-md-9">
+            {% if report_html %}
+            <div class="report-content">
+                {{ report_html|safe }}
+            </div>
+            {% else %}
+            <div class="no-selection">
+                <h4>Select a report from the list to view its contents</h4>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %}

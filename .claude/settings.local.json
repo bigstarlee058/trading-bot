@@ -3,7 +3,13 @@
     "allow": [
       "Bash(find:*)",
       "Bash(.venv/bin/python:*)",
-      "Read(//Users/willer/GitHub/trading-strategies/**)"
+      "Read(//Users/willer/GitHub/trading-strategies/**)",
+      "Bash(python backtest.py 1d-soxl --details)",
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(./backtest.py:*)",
+      "Bash(python:*)",
+      "WebSearch"
     ],
     "deny": []
   }
