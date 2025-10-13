@@ -6,6 +6,7 @@ import time
 import nest_asyncio
 import configparser
 import math
+import pytz
 
 import pandas as pd
 from broker_root import broker_root
@@ -94,13 +95,17 @@ class broker_ibkr(broker_root):
             self.load_conn()
         return self.conn.isConnected()
 
-    def get_stock(self, symbol, forhistory=False):
+    def get_stock(self, symbol, forhistory=False, use_overnight=False):
         if not self.check_connection():
             raise Exception("Unable to establish connection to Interactive Brokers")
         self.load_conn()
+
+        # Create cache key that includes use_overnight flag
+        cache_key = f"{symbol}_overnight" if use_overnight else symbol
+
         # keep a cache of stocks to avoid repeated calls to IB
-        if symbol in stock_cache:
-            stock = stock_cache[symbol]
+        if cache_key in stock_cache:
+            stock = stock_cache[cache_key]
         else:
             # remove the TV-style 1! suffix from the symbol (e.g. NQ1! -> NQ)
             symbol = symbol.replace('1!', '')
@@ -108,16 +113,21 @@ class broker_ibkr(broker_root):
                 pass
 
             elif symbol in ['SOXL','SOXS']:
-                # Use SMART routing for better reliability
-                stock = Stock(symbol, 'SMART', 'USD')
-                #stock = Stock(symbol, 'ARCA', 'USD')
+                # Use OVERNIGHT exchange for overnight session (8pm-4am)
+                # Set primary exchange to ARCA (their listing exchange)
+                if use_overnight:
+                    stock = Stock(symbol, 'OVERNIGHT', 'USD')
+                    stock.primaryExchange = 'ARCA'
+                    print(f"  Using OVERNIGHT exchange for overnight session: {symbol}")
+                else:
+                    stock = Stock(symbol, 'SMART', 'USD')
                 stock.is_futures = 0
                 stock.round_precision = 100
                 stock.market_order = False
 
             elif symbol in ['NQ', 'ES', 'MNQ', 'MES']:
                 if not forhistory:
-                    stock = Future(symbol, '20250919', 'CME')
+                    stock = Future(symbol, '20251219', 'CME')
                 else:
                     stock = Contract(symbol=symbol, secType='CONTFUT', exchange='CME', includeExpired=True)
                 stock.is_futures = 1
@@ -135,7 +145,7 @@ class broker_ibkr(broker_root):
 
             elif symbol in ['YM','MYM']:
                 if not forhistory:
-                    stock = Future(symbol, '20250919', 'CBOT')
+                    stock = Future(symbol, '20241219', 'CBOT')
                 else:
                     stock = Contract(symbol=symbol, secType='CONTFUT', exchange='CBOT', includeExpired=True)
                 stock.is_futures = 1
@@ -262,12 +272,18 @@ class broker_ibkr(broker_root):
                 stock.market_order = False
 
             else:
-                stock = Stock(symbol, 'SMART', 'USD')
+                # Use OVERNIGHT exchange for overnight session (8pm-4am)
+                # For stocks without a known primary exchange, we'll let IBKR figure it out
+                if use_overnight:
+                    stock = Stock(symbol, 'OVERNIGHT', 'USD')
+                    print(f"  Using OVERNIGHT exchange for overnight session: {symbol}")
+                else:
+                    stock = Stock(symbol, 'SMART', 'USD')
                 stock.is_futures = 0
                 stock.round_precision = 100
                 stock.market_order = False
 
-            stock_cache[symbol] = stock
+            stock_cache[cache_key] = stock
         return stock
 
     def get_price(self, symbol):
@@ -392,7 +408,13 @@ class broker_ibkr(broker_root):
             return
 
         self.load_conn()
-        stock = self.get_stock(symbol)
+
+        # Check if it's after 8pm ET for after-hours trading
+        eastern = pytz.timezone('US/Eastern')
+        now_et = datetime.datetime.now(eastern)
+        is_after_hours = now_et.hour >= 20  # 8pm or later
+
+        stock = self.get_stock(symbol, use_overnight=is_after_hours)
 
         # get the current position size
         position_size = self.get_position_size(symbol)

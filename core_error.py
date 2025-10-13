@@ -153,3 +153,22 @@ def handle_ex(e, context="unknown", service="unknown", extra_tags=None):
     
     print(f"Error in {context}: {error_text}")  # Console logging
     return error_text  # Return for optional use by caller
+
+def send_sms_alert(message):
+    """
+    Send an SMS alert via TextMagic
+
+    Args:
+        message: The message to send
+    """
+    if textmagic_enabled and 'textmagic_client' in globals():
+        try:
+            textmagic_client.messages.create(phones=textmagic_phone, text=message)
+            print(f"SMS alert sent to {textmagic_phone}: {message}")
+            return True
+        except Exception as e:
+            print(f"Failed to send SMS alert: {e}")
+            return False
+    else:
+        print(f"SMS alert skipped (TextMagic disabled): {message}")
+        return False
