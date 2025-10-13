@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+"""Cancel all open orders across all IBKR accounts"""
+
+import configparser
+from ib_insync import IB
+import sys
+import time
+
+def get_account_config(account, config):
+    """Get account config with group inheritance"""
+    account_config = config[account]
+    if 'group' in account_config:
+        group = account_config['group']
+        group_config = config[group]
+        # Merge group config into account config, account config takes precedence
+        merged_config = {**group_config, **account_config}
+        return merged_config
+    return dict(account_config)
+
+def get_ibkr_accounts():
+    """Get list of actual IBKR account numbers from bot config"""
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+
+    # Get all account numbers from bot-live config
+    # Use 'accountsfull' which has all accounts
+    if 'bot-live' not in config:
+        print("Error: bot-live not found in config.ini")
+        return []
+
+    bot_config = config['bot-live']
+    # Try different account list names
+    account_list_str = None
+    for key in ['accountsfull', 'accounts']:
+        if key in bot_config:
+            account_list_str = bot_config[key]
+            break
+
+    if not account_list_str:
+        print("Error: No account list found in bot-live config")
+        return []
+
+    account_numbers = [acc.strip() for acc in account_list_str.split(',')]
+
+    # Get connection info for each account
+    accounts = []
+    for account_num in account_numbers:
+        if account_num in config:
+            aconfig = get_account_config(account_num, config)
+            if 'host' in aconfig:
+                accounts.append({
+                    'number': account_num,
+                    'host': aconfig['host'],
+                    'port': int(aconfig['port'])
+                })
+
+    return accounts
+
+def cancel_all_orders(account_number, host, port, client_id, use_global_cancel=False):
+    """Cancel all open orders for a specific account"""
+    print(f"\nAccount {account_number} ({host}:{port})...")
+
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, timeout=20)
+
+        # Request ALL open orders (not just this client session)
+        ib.reqAllOpenOrders()
+        time.sleep(2)  # Give it time to receive all orders
+
+        # Get all open orders
+        open_trades = ib.openTrades()
+
+        # Filter to only this account's orders
+        open_trades = [t for t in open_trades if t.order.account == account_number]
+
+        if not open_trades:
+            print(f"  No open orders")
+            ib.disconnect()
+            time.sleep(1)  # Give it time to disconnect
+            return 0
+
+        print(f"  Found {len(open_trades)} open order(s) for this account")
+
+        if use_global_cancel:
+            # Use global cancel - cancels ALL orders for this account
+            print(f"  Using GLOBAL CANCEL to cancel all orders...")
+            ib.reqGlobalCancel()
+            cancelled = len(open_trades)
+            print(f"    ✓ Global cancel request sent")
+        else:
+            # Try to cancel each order individually
+            cancelled = 0
+            for trade in open_trades:
+                order = trade.order
+                contract = trade.contract
+                status = trade.orderStatus.status
+
+                print(f"  Order ID {order.orderId} ({status}): {order.action} {order.totalQuantity} {contract.symbol} "
+                      f"({order.orderType} @ {order.lmtPrice if hasattr(order, 'lmtPrice') else 'MKT'})")
+
+                try:
+                    ib.cancelOrder(order)
+                    cancelled += 1
+                    print(f"    ✓ Cancel request sent")
+                except Exception as e:
+                    print(f"    ✗ Cancel failed: {e}")
+
+        if cancelled > 0:
+            print(f"  ✓ Sent cancel requests for {cancelled} order(s)")
+            print(f"  Waiting for confirmations...")
+            time.sleep(3)  # Wait for cancellations to process
+
+            # Verify cancellations
+            print(f"  Verifying cancellations...")
+            ib.reqAllOpenOrders()
+            time.sleep(2)
+
+            remaining_trades = [t for t in ib.openTrades() if t.order.account == account_number]
+
+            if remaining_trades:
+                print(f"  ⚠️  Warning: {len(remaining_trades)} order(s) still open after cancel:")
+                for trade in remaining_trades:
+                    print(f"    Order {trade.order.orderId}: {trade.orderStatus.status}")
+            else:
+                print(f"  ✓ All orders successfully cancelled")
+
+        ib.disconnect()
+        time.sleep(1)  # Give it time to disconnect before next connection
+        return cancelled
+
+    except Exception as e:
+        print(f"  ✗ Error: {e}")
+        try:
+            ib.disconnect()
+            time.sleep(1)
+        except:
+            pass
+        return 0
+
+def get_all_open_orders(accounts):
+    """Get all open orders from all accounts without cancelling"""
+    all_orders = []
+
+    for idx, account in enumerate(accounts):
+        client_id = 800 + idx  # Different range from cancel
+        ib = IB()
+        try:
+            ib.connect(account['host'], account['port'], clientId=client_id, timeout=20)
+            ib.reqAllOpenOrders()
+            time.sleep(2)
+
+            open_trades = ib.openTrades()
+            # Filter to this account
+            account_trades = [t for t in open_trades if t.order.account == account['number']]
+
+            for trade in account_trades:
+                all_orders.append({
+                    'account': account['number'],
+                    'trade': trade
+                })
+
+            ib.disconnect()
+            time.sleep(1)
+        except Exception as e:
+            print(f"Error checking {account['number']}: {e}")
+            try:
+                ib.disconnect()
+                time.sleep(1)
+            except:
+                pass
+
+    return all_orders
+
+def main():
+    print("=" * 80)
+    print("CANCEL ALL OPEN ORDERS")
+    print("=" * 80)
+
+    if '--help' in sys.argv or '-h' in sys.argv:
+        print("\nUsage:")
+        print("  ./cancel-all-orders           # Interactive mode")
+        print("  ./cancel-all-orders --global  # Use GLOBAL CANCEL (for stuck orders)")
+        print("  ./cancel-all-orders --force   # Skip confirmation")
+        print("\nNOTE: If orders won't cancel, use --global flag")
+        return
+
+    accounts = get_ibkr_accounts()
+
+    if not accounts:
+        print("No IBKR accounts found in config.ini")
+        return
+
+    print(f"\nFound {len(accounts)} IBKR account(s): {', '.join([a['number'] for a in accounts])}")
+
+    # First, get and display all open orders
+    print("\nFetching open orders...")
+    all_orders = get_all_open_orders(accounts)
+
+    if not all_orders:
+        print("\nNo open orders found.")
+        return
+
+    print(f"\n{'='*80}")
+    print(f"FOUND {len(all_orders)} OPEN ORDER(S):")
+    print(f"{'='*80}")
+
+    for order_info in all_orders:
+        trade = order_info['trade']
+        order = trade.order
+        contract = trade.contract
+        status = trade.orderStatus.status
+
+        print(f"\nAccount: {order_info['account']}")
+        print(f"  {order.action} {order.totalQuantity} {contract.symbol}")
+        print(f"  Type: {order.orderType} @ {order.lmtPrice if hasattr(order, 'lmtPrice') else 'MARKET'}")
+        print(f"  Status: {status}")
+
+    # Get confirmation if not using --force flag
+    use_global = '--global' in sys.argv
+
+    if '--force' not in sys.argv:
+        print(f"\n{'='*80}")
+        if use_global:
+            print("This will use GLOBAL CANCEL (recommended for stuck orders)")
+        response = input(f"\nCancel all {len(all_orders)} order(s)? (yes/no): ")
+        if response.lower() != 'yes':
+            print("Cancelled.")
+            return
+
+    print(f"\n{'='*80}")
+    if use_global:
+        print("CANCELLING ORDERS (GLOBAL CANCEL MODE)...")
+    else:
+        print("CANCELLING ORDERS...")
+    print(f"{'='*80}")
+
+    total_cancelled = 0
+    for idx, account in enumerate(accounts):
+        # Use different client ID for each account
+        client_id = 900 + idx
+        cancelled = cancel_all_orders(account['number'], account['host'], account['port'], client_id, use_global_cancel=use_global)
+        total_cancelled += cancelled
+
+    print("\n" + "=" * 80)
+    print(f"TOTAL: Cancelled {total_cancelled} order(s) across all accounts")
+    print("=" * 80)
+
+if __name__ == '__main__':
+    main()

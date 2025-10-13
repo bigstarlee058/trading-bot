@@ -12,3 +12,4 @@ flask_sqlalchemy
 textmagic
 flask_apscheduler
 gunicorn
+markdown
